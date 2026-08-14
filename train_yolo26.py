@@ -256,6 +256,238 @@ def print_and_save_metrics(metrics, save_dir: Path) -> dict:
     return full_results
 
 
+def box_iou(box1, box2):
+    x11, y11, x12, y12 = box1
+    x21, y21, x22, y22 = box2
+    xi1 = max(x11, x21)
+    yi1 = max(y11, y21)
+    xi2 = min(x12, x22)
+    yi2 = min(y12, y22)
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    box1_area = (x12 - x11) * (y12 - y11)
+    box2_area = (x22 - x21) * (y22 - y21)
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / max(1e-6, union_area)
+
+
+def compute_ap_pure_python(tp, fp, num_gts):
+    if num_gts == 0:
+        return 0.0
+    tp_cum = []
+    fp_cum = []
+    t_sum = 0
+    f_sum = 0
+    for t, f in zip(tp, fp):
+        t_sum += t
+        f_sum += f
+        tp_cum.append(t_sum)
+        fp_cum.append(f_sum)
+        
+    recalls = [t / num_gts for t in tp_cum]
+    precisions = [t / (t + f) if (t + f) > 0 else 0.0 for t, f in zip(tp_cum, fp_cum)]
+    
+    mrec = [0.0] + recalls + [1.0]
+    mpre = [1.0] + precisions + [0.0]
+    
+    for i in range(len(mpre) - 2, -1, -1):
+        mpre[i] = max(mpre[i], mpre[i+1])
+        
+    ap = 0.0
+    for i in range(len(mrec) - 1):
+        if mrec[i+1] != mrec[i]:
+            ap += (mrec[i+1] - mrec[i]) * mpre[i+1]
+    return ap
+
+
+def run_tiled_evaluation(model, data_cfg_path: Path, tile_size: int, overlap: float, device: str | int | None, save_dir: Path, conf: float = 0.001):
+    import yaml
+    from PIL import Image
+    
+    with data_cfg_path.open("r", encoding="utf-8") as f:
+        data_cfg = yaml.safe_load(f)
+        
+    dataset_root = Path(data_cfg["path"])
+    val_rel_img = data_cfg.get("val", "images/val")
+    val_img_dir = (dataset_root / val_rel_img).resolve()
+    
+    val_label_dir = Path(str(val_img_dir).replace("images", "labels"))
+    
+    class_names = data_cfg.get("names", {})
+    class_names = {int(k): v for k, v in class_names.items()}
+    
+    img_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    images = sorted(p for p in val_img_dir.glob("*") if p.suffix.lower() in img_extensions)
+    
+    if not images:
+        print(f"[!] No validation images found in: {val_img_dir}")
+        return
+        
+    print(f"\n[+] Running Tiled Validation on {len(images)} images (Tile Size: {tile_size}, Overlap: {overlap})...")
+    
+    all_gts = {cid: 0 for cid in class_names}
+    pred_by_class = {cid: [] for cid in class_names}
+    
+    step = max(1, int(tile_size * (1 - overlap)))
+    
+    for idx, img_path in enumerate(images):
+        label_path = val_label_dir / f"{img_path.stem}.txt"
+        gts = []
+        if label_path.is_file():
+            content = label_path.read_text(encoding="utf-8").strip()
+            if content:
+                for line in content.split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    if len(parts) == 5:
+                        cid = int(parts[0])
+                        gts.append((cid, float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])))
+                        
+        with Image.open(img_path) as img:
+            w, h = img.size
+            
+        abs_gts = []
+        for cid, x, y, bw, bh in gts:
+            x1 = (x - bw/2) * w
+            y1 = (y - bh/2) * h
+            x2 = (x + bw/2) * w
+            y2 = (y + bh/2) * h
+            abs_gts.append((cid, x1, y1, x2, y2))
+            all_gts[cid] = all_gts.get(cid, 0) + 1
+            
+        pil_img = Image.open(img_path).convert("RGB")
+        img_w, img_h = pil_img.size
+        
+        raw_boxes = []
+        for top in range(0, img_h, step):
+            for left in range(0, img_w, step):
+                crop_w = min(tile_size, img_w - left)
+                crop_h = min(tile_size, img_h - top)
+                if crop_w <= 0 or crop_h <= 0:
+                    continue
+                crop = pil_img.crop((left, top, left + crop_w, top + crop_h))
+                results = model(crop, imgsz=tile_size, conf=conf, device=device, verbose=False)[0]
+                for box in results.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    score = float(box.conf[0])
+                    cls = int(box.cls[0])
+                    raw_boxes.append(([x1 + left, y1 + top, x2 + left, y2 + top], score, cls))
+                    
+        raw_boxes.sort(key=lambda x: x[1], reverse=True)
+        kept_preds = []
+        for cand in raw_boxes:
+            cand_box, cand_score, cand_cls = cand
+            if not any(cand_cls == chosen[2] and box_iou(cand_box, chosen[0]) >= 0.5 for chosen in kept_preds):
+                kept_preds.append(cand)
+                
+        preds_by_cid = {cid: [] for cid in class_names}
+        for box, score, cls in kept_preds:
+            if cls in preds_by_cid:
+                preds_by_cid[cls].append((score, box))
+                
+        gts_by_cid = {cid: [] for cid in class_names}
+        for cid, x1, y1, x2, y2 in abs_gts:
+            gts_by_cid[cid].append([x1, y1, x2, y2, False])
+            
+        for cid in class_names:
+            p_list = preds_by_cid[cid]
+            g_list = gts_by_cid[cid]
+            
+            p_list.sort(key=lambda x: x[0], reverse=True)
+            
+            for score, p_box in p_list:
+                best_iou = 0.0
+                best_gt_idx = -1
+                for g_idx, g_box in enumerate(g_list):
+                    iou_val = box_iou(p_box, g_box[:4])
+                    if iou_val > best_iou:
+                        best_iou = iou_val
+                        best_gt_idx = g_idx
+                        
+                if best_iou >= 0.5 and best_gt_idx != -1 and not g_list[best_gt_idx][4]:
+                    g_list[best_gt_idx][4] = True
+                    pred_by_class[cid].append((score, 1, 0))
+                else:
+                    pred_by_class[cid].append((score, 0, 1))
+
+    per_class_results = []
+    overall_tp = 0
+    overall_fp = 0
+    overall_gt = sum(all_gts.values())
+    
+    for cid in class_names:
+        name = class_names[cid]
+        c_preds = pred_by_class[cid]
+        c_preds.sort(key=lambda x: x[0], reverse=True)
+        
+        tp = [x[1] for x in c_preds]
+        fp = [x[2] for x in c_preds]
+        num_gts = all_gts[cid]
+        
+        ap50 = compute_ap_pure_python(tp, fp, num_gts)
+        
+        total_tp = sum(tp)
+        total_fp = sum(fp)
+        overall_tp += total_tp
+        overall_fp += total_fp
+        
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+        recall = total_tp / num_gts if num_gts > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        per_class_results.append({
+            "class_id": cid,
+            "class_name": name,
+            "mAP50": round(ap50, 4),
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+            "support": num_gts
+        })
+        
+    overall_precision = overall_tp / (overall_tp + overall_fp) if (overall_tp + overall_fp) > 0 else 0.0
+    overall_recall = overall_tp / overall_gt if overall_gt > 0 else 0.0
+    overall_f1 = 2 * overall_precision * overall_recall / (overall_precision + overall_recall) if (overall_precision + overall_recall) > 0 else 0.0
+    
+    valid_aps = [r["mAP50"] for r in per_class_results if r["support"] > 0]
+    overall_map50 = sum(valid_aps) / len(valid_aps) if valid_aps else 0.0
+    
+    summary_metrics = {
+        "mAP50": round(overall_map50, 4),
+        "Precision": round(overall_precision, 4),
+        "Recall": round(overall_recall, 4),
+        "F1_Score": round(overall_f1, 4),
+    }
+    
+    print("\n" + "=" * 60)
+    print("      YOLO26 TILED OBJECT DETECTION EVALUATION SCORES")
+    print("=" * 60)
+    print(f"  mAP@50      (Overall Accuracy @ IoU 0.50) : {summary_metrics['mAP50']:.4f} ({summary_metrics['mAP50'] * 100:.2f}%)")
+    print(f"  Precision   (Positive Predictive Value)  : {summary_metrics['Precision']:.4f} ({summary_metrics['Precision'] * 100:.2f}%)")
+    print(f"  Recall      (Sensitivity / True Pos Rate): {summary_metrics['Recall']:.4f} ({summary_metrics['Recall'] * 100:.2f}%)")
+    print(f"  F1-Score    (Harmonic Mean P & R)        : {summary_metrics['F1_Score']:.4f} ({summary_metrics['F1_Score'] * 100:.2f}%)")
+    print("=" * 60)
+    
+    print("\nTiled Per-Class Breakdown:")
+    print(f"{'Class ID':<10} {'Class Name':<35} {'mAP50':<10} {'Precision':<10} {'Recall':<10} {'F1':<10}")
+    print("-" * 90)
+    for r in per_class_results:
+        print(f"{r['class_id']:<10} {r['class_name']:<35} {r['mAP50']:<10.4f} {r['precision']:<10.4f} {r['recall']:<10.4f} {r['f1']:<10.4f}")
+    print("-" * 90)
+    
+    full_results = {
+        "model": "YOLO26_Tiled",
+        "summary": summary_metrics,
+        "per_class": per_class_results
+    }
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / "yolo26_tiled_evaluation_results.json"
+    save_path.write_text(json.dumps(full_results, indent=2), encoding="utf-8")
+    print(f"\n[+] Tiled validation results saved to: [yolo26_tiled_evaluation_results.json](file:///{save_path.as_posix()})")
+    return full_results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train YOLO26 Object Detector for Rice & Maize Pest and Disease Detection.")
     parser.add_argument("--data", type=Path, default=Path("dataset.yaml"), help="Path to dataset.yaml (default: dataset.yaml)")
@@ -272,6 +504,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--val-only", action="store_true", help="Skip training and run validation/evaluation on pre-trained model")
     parser.add_argument("--no-auto-dataset", action="store_true", help="Disable automatic dataset generation from raw images if yolo_dataset is missing")
+    parser.add_argument("--tile-val", action="store_true", help="Run tiled/sliced validation instead of standard validation")
+    parser.add_argument("--tile-size", type=int, default=1280, help="Tile size for tiled validation/inference")
+    parser.add_argument("--tile-overlap", type=float, default=0.25, help="Overlap ratio between tiles")
+    parser.add_argument("--tile-conf", type=float, default=0.001, help="Confidence threshold for tiled validation")
 
     args = parser.parse_args()
 
@@ -328,12 +564,23 @@ def main():
         if best_weights.exists():
             model = YOLO(str(best_weights))
 
-    # Perform Validation and compute accuracy & scores
-    print("\n[+] Evaluating YOLO26 Model on Validation Dataset...")
-    val_results = model.val(data=str(data_path.as_posix()), imgsz=args.imgsz, device=device, split="val")
-
     save_dir = Path(getattr(model.trainer, "save_dir", Path(args.project) / args.name))
-    print_and_save_metrics(val_results, save_dir)
+
+    if args.tile_val:
+        run_tiled_evaluation(
+            model=model,
+            data_cfg_path=data_path,
+            tile_size=args.tile_size,
+            overlap=args.tile_overlap,
+            device=device,
+            save_dir=save_dir,
+            conf=args.tile_conf
+        )
+    else:
+        # Perform Standard Validation and compute accuracy & scores
+        print("\n[+] Evaluating YOLO26 Model on Validation Dataset...")
+        val_results = model.val(data=str(data_path.as_posix()), imgsz=args.imgsz, device=device, split="val")
+        print_and_save_metrics(val_results, save_dir)
 
 
 if __name__ == "__main__":
