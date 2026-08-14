@@ -78,6 +78,27 @@ python predict_tiled.py --weights runs/pest_disease_yolo11/weights/best.pt --sou
 Tiling prevents a tiny insect in a wide field image from being reduced to only
 a few pixels. Outputs are written to `runs/tiled_predictions/`.
 
+## 5. Model Comparison (YOLO11s vs YOLO26s)
+
+You can run the comparative benchmark script to evaluate the parameters, latency, and predictions of both models side-by-side on a sample validation image:
+
+```powershell
+python compare_yolo11_yolo26.py
+```
+
+### Benchmark Results (RTX 4050 Laptop GPU)
+
+| Metric | YOLO11s | YOLO26s |
+| :--- | :--- | :--- |
+| **Weights File** | `yolo11s.pt` (Pretrained) | `best.pt` (Custom Trained) |
+| **Parameters** | 9.46M | 9.96M |
+| **Inference Latency** | 147.65 ms / image | 170.79 ms / image |
+| **Detections Count** | 0 | 2 |
+
+*Note: Custom-trained YOLO26s successfully detects localized pests, whereas general pretrained YOLO11s has no prior agricultural domain knowledge and scores 0 detections.*
+
+Visual comparison output is saved to `runs/comparison_output.jpg`.
+
 ## Train now with the supplied folder-only data (classification)
 
 The original `dataset/` directory has image-level labels, so it can train a
