@@ -24,7 +24,7 @@ def main() -> None:
         raise SystemExit("Classification data is missing. Run prepare_yolo11_classification.py first. Missing: " + ", ".join(map(str, missing)))
     model = YOLO(args.model)
     model.train(
-        data=str(data), epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, device=args.device,
+        data=str(data),epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, device=args.device,
         project=args.project, name=args.name, pretrained=True, patience=25, optimizer="auto",
         cos_lr=True, fliplr=0.5, translate=0.08, scale=0.25, erasing=0.15,
         workers=4, seed=42, plots=True,

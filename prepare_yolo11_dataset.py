@@ -23,11 +23,12 @@ def slug(text: str) -> str:
 def image_files(root: Path):
     return sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
 
-
 def class_for(image: Path, source: Path) -> str | None:
     relative = image.relative_to(source)
     parts = relative.parts
     crop = slug(parts[0])
+
+
     if len(parts) == 3 and parts[1].lower() == "healthy":
         return None
     if len(parts) < 4 or parts[1].lower() not in {"disease", "insect-pests"}:
@@ -39,6 +40,7 @@ def class_for(image: Path, source: Path) -> str | None:
 def labelme_boxes(json_path: Path, width: int, height: int, name_to_id: dict[str, int]):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     rows = []
+    
     for shape in data.get("shapes", []):
         label = slug(str(shape.get("label", "")))
         if label not in name_to_id:
@@ -61,8 +63,10 @@ def split_by_class(records, seed: int):
     groups: dict[str, list[tuple[Path, str | None]]] = {}
     for record in records:
         groups.setdefault(record[1] or "__negative__", []).append(record)
+
     rng = random.Random(seed)
     split = {"train": [], "val": [], "test": []}
+
     for group in groups.values():
         rng.shuffle(group)
         n = len(group)
@@ -86,15 +90,20 @@ def main():
     if output.exists():
         raise SystemExit(f"Output already exists: {output}. Choose a new path or remove it deliberately.")
     images = image_files(source)
+
     if not images:
         raise SystemExit(f"No images found under {source}")
+    
     classes = sorted({c for p in images if (c := class_for(p, source))})
     name_to_id = {name: i for i, name in enumerate(classes)}
     print("Detection labels:")
+
     for name, idx in name_to_id.items():
         print(f"  {idx}: {name}")
+
     records = [(image, class_for(image, source)) for image in images]
     missing = []
+
     for image, target in records:
         if target is not None:
             json_path = annotations / image.relative_to(source).with_suffix(".json")
@@ -103,6 +112,7 @@ def main():
     if missing:
         sample = "\n  ".join(str(p) for p in missing[:10])
         raise SystemExit(f"Missing LabelMe boxes for {len(missing)} affected images. First missing:\n  {sample}")
+    
     splits = split_by_class(records, args.seed)
     try:
         for split, members in splits.items():

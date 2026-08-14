@@ -1,3 +1,6 @@
 /classification_dataset/
 /dataset/
 /runs/
+/yolo26s.pt/
+/yolo_dataset/
+/yolo11s.pt/

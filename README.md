@@ -31,13 +31,27 @@ The command creates `yolo_dataset/dataset.yaml`, deterministic train/validation/
 splits, and a report. It stops if an affected image has no annotation, preventing
 accidental training with unlabeled pests.
 
-## 3. Train YOLO11, tuned for small objects
+## 3. Train YOLO Detector (YOLO11 or YOLO26)
+
+### Train YOLO26 (Recommended)
+
+```powershell
+python train_yolo26.py --data dataset.yaml --model yolo26n.pt --epochs 150 --device 0
+```
+
+`yolo26n.pt` (or `yolo26s.pt`) is used with GPU training enabled (`--device 0`). The script automatically evaluates validation accuracy and metrics, computing:
+- **mAP@50** (Overall Detection Accuracy @ IoU 0.50)
+- **mAP@50-95** (Overall Detection Accuracy @ IoU 0.50:0.95)
+- **Precision**, **Recall**, and **F1-Score**
+- Per-class metric breakdown saved to `yolo26_evaluation_results.json`.
+
+### Train YOLO11
 
 ```powershell
 python train_yolo11.py --data yolo_dataset/dataset.yaml --model yolo11s.pt --epochs 150 --device 0
 ```
 
-`yolo11s.pt` is a good first model. The program uses 1280-pixel input and a
+`yolo11s.pt` is a good baseline model. The program uses 1280-pixel input and a
 small-object augmentation profile. If GPU memory permits, use `yolo11m.pt`.
 
 ## 4. Detect with tiling
