@@ -39,11 +39,26 @@ accidental training with unlabeled pests.
 python train_yolo26.py --data dataset.yaml --model yolo26n.pt --epochs 150 --device 0
 ```
 
-`yolo26n.pt` (or `yolo26s.pt`) is used with GPU training enabled (`--device 0`). The script automatically evaluates validation accuracy and metrics, computing:
-- **mAP@50** (Overall Detection Accuracy @ IoU 0.50)
-- **mAP@50-95** (Overall Detection Accuracy @ IoU 0.50:0.95)
-- **Precision**, **Recall**, and **F1-Score**
-- Per-class metric breakdown saved to `yolo26_evaluation_results.json`.
+`yolo26n.pt` (or `yolo26s.pt`) is used with GPU training enabled (`--device 0`). The script automatically evaluates validation accuracy and metrics, computing standard mAP@50, mAP@50-95, Precision, Recall, and F1-Score, saving them to `yolo26_evaluation_results.json`.
+
+#### Tiled Validation (for Small Pests)
+When evaluating the trained YOLO26 model on small objects, running validation in tiles (crops) is highly recommended to assess performance at the proper scale. To run tiled validation:
+
+```powershell
+# Evaluate existing weights
+python train_yolo26.py --model runs/detect/runs/pest_disease_yolo26s-2/weights/best.pt --val-only --tile-val
+
+# Or run automatically at the end of training
+python train_yolo26.py --model yolo26s.pt --epochs 150 --device 0 --tile-val
+```
+
+You can customize the tiled evaluation parameters:
+* `--tile-size` (default: `1280`): Dimensions of each image slice.
+* `--tile-overlap` (default: `0.25`): Overlap ratio between adjacent tiles.
+* `--tile-conf` (default: `0.001`): Confidence threshold for predictions (set low for mAP curves).
+
+The output breakdown is saved directly to `yolo26_tiled_evaluation_results.json`.
+
 
 ### Train YOLO11
 
