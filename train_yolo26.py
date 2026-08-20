@@ -1,4 +1,6 @@
-"""Train a YOLO26 detector for ICAR rice and maize pest and disease detection.
+"""Train a YOLO26s detector for rice pest and disease detection.
+
+Trained on manually annotated Label Studio bounding boxes (8 rice classes).
 This script initializes and trains a YOLO26 object detection model on GPU,
 performs validation, and outputs evaluation scores including mAP@50, mAP@50-95,
 Precision, Recall, F1-Score, and per-class metrics.
@@ -489,17 +491,17 @@ def run_tiled_evaluation(model, data_cfg_path: Path, tile_size: int, overlap: fl
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train YOLO26 Object Detector for Rice & Maize Pest and Disease Detection.")
-    parser.add_argument("--data", type=Path, default=Path("dataset.yaml"), help="Path to dataset.yaml (default: dataset.yaml)")
+    parser = argparse.ArgumentParser(description="Train YOLO26s Object Detector for Rice Pest and Disease Detection.")
+    parser.add_argument("--data", type=Path, default=Path("rice_annotated_dataset/dataset.yaml"), help="Path to dataset.yaml (default: rice_annotated_dataset/dataset.yaml)")
     parser.add_argument("--model", default="yolo26s.pt", help="Pretrained YOLO26 checkpoint (e.g., yolo26n.pt, yolo26s.pt, yolo26m.pt)")
-    parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs (default: 150)")
-    parser.add_argument("--batch", type=int, default=2, help="Batch size (default: 2, safe for 6GB VRAM)")
-    parser.add_argument("--imgsz", type=int, default=640, help="Input image size (default: 640, reduces memory usage)")
-    parser.add_argument("--amp", action="store_true", help="Enable Automatic Mixed Precision (default: disabled)")
+    parser.add_argument("--epochs", type=int, default=300, help="Number of training epochs (default: 300 for full convergence)")
+    parser.add_argument("--batch", type=int, default=2, help="Batch size (minimum 2 for BatchNorm; use larger with more VRAM)")
+    parser.add_argument("--imgsz", type=int, default=640, help="Input image size (default: 640)")
+    parser.add_argument("--amp", action="store_true", default=True, help="Enable Automatic Mixed Precision (default: enabled)")
     parser.add_argument("--device", default=None, help="GPU device ID (e.g. 0 or 0,1), cpu, or leave blank for auto GPU selection")
     parser.add_argument("--project", default="runs", help="Project output directory")
-    parser.add_argument("--name", default="pest_disease_yolo26", help="Run experiment name")
-    parser.add_argument("--patience", type=int, default=35, help="Early stopping patience epochs")
+    parser.add_argument("--name", default="pest_disease_rice_yolo26s", help="Run experiment name")
+    parser.add_argument("--patience", type=int, default=50, help="Early stopping patience epochs")
     parser.add_argument("--workers", type=int, default=0, help="Data loader worker threads (default: 0 on Windows)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--val-only", action="store_true", help="Skip training and run validation/evaluation on pre-trained model")
@@ -528,7 +530,7 @@ def main():
         print(f"    - Epochs         : {args.epochs}")
         print(f"    - Batch Size     : {args.batch}")
 
-        # Execute GPU Training
+        # Execute GPU Training with accuracy-optimised hyperparameters
         model.train(
             data=str(data_path.as_posix()),
             epochs=args.epochs,
@@ -539,18 +541,38 @@ def main():
             name=args.name,
             pretrained=True,
             patience=args.patience,
+            amp=args.amp,
+
+            # --- Convergence ---
+            optimizer="AdamW",         # Better convergence on small datasets
+            lr0=0.001,                 # Initial learning rate
+            lrf=0.01,                  # Final LR factor
+            cos_lr=True,               # Cosine annealing schedule
+            warmup_epochs=5,           # Warmup for stable start
+            warmup_momentum=0.5,       # Lower momentum during warmup
+            weight_decay=0.0005,       # L2 regularisation
+
+            # --- Regularisation ---
+            label_smoothing=0.1,       # Prevents overconfident predictions
+            dropout=0.1,               # Dropout in classification head
+
+            # --- Augmentation (tuned for pest/disease data) ---
             cache=False,
-            optimizer="auto",
-            cos_lr=True,
-            mosaic=0.35,
-            close_mosaic=20,
-            mixup=0.05,
-            copy_paste=0.15,
-            degrees=8,
-            translate=0.08,
-            scale=0.35,
-            fliplr=0.5,
-            multi_scale=True,
+            mosaic=0.8,                # Strong mosaic
+            close_mosaic=25,           # Disable mosaic last 25 epochs
+            mixup=0.1,                 # Moderate mixup
+            copy_paste=0.1,            # Copy-paste augmentation
+            degrees=15,                # Rotation range
+            translate=0.1,             # Translation range
+            scale=0.5,                 # Scale variation
+            shear=2.0,                 # Slight shear
+            fliplr=0.5,                # Horizontal flip
+            flipud=0.1,                # Occasional vertical flip
+            hsv_h=0.02,                # Hue shift (subtle — preserve colours)
+            hsv_s=0.7,                 # Saturation variation
+            hsv_v=0.4,                 # Brightness variation
+            multi_scale=False,         # Disabled: prevents OOM with small batch on 6GB GPU
+
             workers=args.workers,
             seed=args.seed,
             plots=True,

@@ -1,6 +1,30 @@
+# ── Trained model weights (large files) ──────────────────────
+/runs/
+/yolo11s.pt
+/yolo26s.pt
+
+# ── Datasets (large image folders) ───────────────────────────
+/annotated dataset/
+/rice_annotated_dataset/
+/rice_dataset_fixed/
 /classification_dataset/
 /dataset/
-/runs/
-/yolo26s.pt/
 /yolo_dataset/
-/yolo11s.pt/
+
+# ── Test outputs ──────────────────────────────────────────────
+/test_results/
+/ppt_assets/
+
+# ── Python cache ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.eggs/
+
+# ── OS / Editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

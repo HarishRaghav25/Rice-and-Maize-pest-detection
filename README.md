@@ -1,118 +1,152 @@
-# Rice and maize pest + disease detection (YOLO11)
+# Rice Pest & Disease Detection (YOLO11s & YOLO26s)
 
-This project trains an **object detector**, not an image classifier. The current
-`dataset/` folders provide image-level class names, but do not include bounding
-boxes. Box annotations are mandatory for meaningful pest detection—especially
-for aphids and other small insects. Do not use a full-image box as a substitute.
+ICAR project for detecting rice pests and diseases in field images using
+**YOLOv11s** and **YOLOv26s** object detection models, with deployment
+support for **NVIDIA Jetson Nano 2GB**.
 
-## 1. Annotate the images
+## Dataset Overview
 
-Use Label Studio, CVAT, Roboflow, or LabelMe to draw a tight box around every
-visible pest, lesion, or disease symptom. Export LabelMe JSON files and place
-them in a mirrored `annotations/` tree, for example:
+| Property | Value |
+|:---|:---|
+| **Total images** | 403 (manually annotated via Label Studio) |
+| **Bounding boxes** | 761 (tight, manually drawn) |
+| **Classes** | 8 rice pest & disease categories |
+| **Healthy negatives** | 50 background images |
+| **Splits** | 70% train / 20% val / 10% test |
 
-```text
-annotations/Rice/Insect-pests/05_Leaf_folder/4c6ee278-....json
-dataset/Rice/Insect-pests/05_Leaf_folder/4c6ee278-....Jpg
-```
-
-Each LabelMe shape must be a rectangle and its `label` must be one of the class
-names written by the preparation command. Healthy images are retained as
-negative examples and require no JSON file.
-
-## 2. Create a detection dataset
+## Quick Start — Full Pipeline
 
 ```powershell
-python -m pip install -r requirements.txt
-python prepare_yolo11_dataset.py --source dataset --annotations annotations --output yolo_dataset
+# Step 1: Build the YOLO dataset from Label Studio annotations
+python build_annotated_dataset.py
+
+# Step 2: Train YOLOv11s (300 epochs, ~6-8 hours on RTX 4050)
+python train_yolo11.py
+
+# Step 3: Train YOLOv26s (300 epochs, ~6-8 hours on RTX 4050)
+python train_yolo26.py
+
+# Step 4: Export best model for Jetson Nano 2GB
+python export_jetson.py --weights runs/pest_disease_rice_yolo26s/weights/best.pt --format onnx
 ```
 
-The command creates `yolo_dataset/dataset.yaml`, deterministic train/validation/test
-splits, and a report. It stops if an affected image has no annotation, preventing
-accidental training with unlabeled pests.
+## 1. Build Dataset from Annotations
 
-## 3. Train YOLO Detector (YOLO11 or YOLO26)
-
-### Train YOLO26 (Recommended)
+The raw annotations are in `annotated dataset/rice/` with per-folder Label Studio
+exports. The build script remaps all local class IDs to a unified 8-class numbering:
 
 ```powershell
-python train_yolo26.py --data dataset.yaml --model yolo26n.pt --epochs 150 --device 0
+python build_annotated_dataset.py --source "annotated dataset" --output rice_annotated_dataset
 ```
 
-`yolo26n.pt` (or `yolo26s.pt`) is used with GPU training enabled (`--device 0`). The script automatically evaluates validation accuracy and metrics, computing standard mAP@50, mAP@50-95, Precision, Recall, and F1-Score, saving them to `yolo26_evaluation_results.json`.
+This generates:
+- `rice_annotated_dataset/images/{train,val,test}/` — images
+- `rice_annotated_dataset/labels/{train,val,test}/` — YOLO-format `.txt` labels
+- `rice_annotated_dataset/dataset.yaml` — Ultralytics dataset config
+- `rice_annotated_dataset/report.json` — class distribution stats
 
-#### Tiled Validation (for Small Pests)
-When evaluating the trained YOLO26 model on small objects, running validation in tiles (crops) is highly recommended to assess performance at the proper scale. To run tiled validation:
+## 2. Train YOLO Detectors
+
+### YOLOv11s
 
 ```powershell
-# Evaluate existing weights
-python train_yolo26.py --model runs/detect/runs/pest_disease_yolo26s-2/weights/best.pt --val-only --tile-val
-
-# Or run automatically at the end of training
-python train_yolo26.py --model yolo26s.pt --epochs 150 --device 0 --tile-val
+python train_yolo11.py --epochs 300 --device 0
 ```
 
-You can customize the tiled evaluation parameters:
-* `--tile-size` (default: `1280`): Dimensions of each image slice.
-* `--tile-overlap` (default: `0.25`): Overlap ratio between adjacent tiles.
-* `--tile-conf` (default: `0.001`): Confidence threshold for predictions (set low for mAP curves).
-
-The output breakdown is saved directly to `yolo26_tiled_evaluation_results.json`.
-
-
-### Train YOLO11
+### YOLOv26s
 
 ```powershell
-python train_yolo11.py --data yolo_dataset/dataset.yaml --model yolo11s.pt --epochs 150 --device 0
+python train_yolo26.py --epochs 300 --device 0
 ```
 
-`yolo11s.pt` is a good baseline model. The program uses 1280-pixel input and a
-small-object augmentation profile. If GPU memory permits, use `yolo11m.pt`.
+**Key training optimisations:**
+- AdamW optimiser with cosine annealing LR schedule
+- 5-epoch warmup for stable convergence
+- Label smoothing (0.1) to prevent overconfident predictions
+- Dropout (0.1) in classification head
+- Strong mosaic, mixup, and HSV colour augmentations
+- Early stopping with patience=50
 
-## 4. Detect with tiling
+## 3. Tiled Inference for Small Pests
+
+For high-resolution field images where pests are small:
 
 ```powershell
-python predict_tiled.py --weights runs/pest_disease_yolo11/weights/best.pt --source path\\to\\field_photo.jpg
+python predict_tiled.py --weights runs/pest_disease_rice_yolo11s/weights/best.pt --source field_photo.jpg
 ```
 
-Tiling prevents a tiny insect in a wide field image from being reduced to only
-a few pixels. Outputs are written to `runs/tiled_predictions/`.
+## 4. Jetson Nano 2GB Deployment
 
-## 5. Model Comparison (YOLO11s vs YOLO26s)
-
-You can run the comparative benchmark script to evaluate the parameters, latency, and predictions of both models side-by-side on a sample validation image:
+### Export the Model
 
 ```powershell
-python compare_yolo11_yolo26.py
+# ONNX (recommended — universal compatibility)
+python export_jetson.py --weights runs/pest_disease_rice_yolo26s/weights/best.pt --format onnx
+
+# TensorRT (run on Jetson for optimal speed)
+python export_jetson.py --weights runs/pest_disease_rice_yolo26s/weights/best.pt --format engine --imgsz 256
 ```
 
-### Benchmark Results (RTX 4050 Laptop GPU)
+### On the Jetson Nano 2GB
 
-| Metric | YOLO11s | YOLO26s |
-| :--- | :--- | :--- |
-| **Weights File** | `yolo11s.pt` (Pretrained) | `best.pt` (Custom Trained) |
-| **Parameters** | 9.46M | 9.96M |
-| **Inference Latency** | 147.65 ms / image | 170.79 ms / image |
-| **Detections Count** | 0 | 2 |
+```bash
+# 1. Setup (includes 4GB swap for 2GB kit)
+chmod +x jetson_setup.sh && ./jetson_setup.sh
 
-*Note: Custom-trained YOLO26s successfully detects localized pests, whereas general pretrained YOLO11s has no prior agricultural domain knowledge and scores 0 detections.*
+# 2. Run inference on an image
+python3 jetson_inference.py --model jetson_models/best.onnx --source field_photo.jpg
 
-Visual comparison output is saved to `runs/comparison_output.jpg`.
+# 3. Live camera inference
+python3 jetson_inference.py --model jetson_models/best.onnx --source 0        # USB camera
+python3 jetson_inference.py --model jetson_models/best.onnx --source csi      # CSI camera
 
-## Train now with the supplied folder-only data (classification)
-
-The original `dataset/` directory has image-level labels, so it can train a
-classifier immediately. This predicts the condition of an entire photo; it
-does **not** locate a pest or disease with a bounding box.
-
-```powershell
-python prepare_yolo11_classification.py --source dataset --output classification_dataset
-python train_yolo11_classify.py --data classification_dataset --model yolo11s-cls.pt --epochs 100 --device 0
+# 4. For best performance:
+sudo nvpmodel -m 0 && sudo jetson_clocks
 ```
 
-## Labels for this dataset
+### Expected Performance on Jetson Nano 2GB
 
-Run the preparation command first and use the printed canonical labels exactly.
-They combine crop, target type, and folder name (for example
-`rice_pest_leaf_folder` and `maize_disease_maydis_leaf_blight`). Healthy images
-are background-only images, not an object class.
+| Image Size | Expected FPS | Use Case |
+|:---|:---|:---|
+| 256 | ~15-20 FPS | Real-time field scanning |
+| 320 | ~8-12 FPS | Balanced speed/accuracy |
+| 416 | ~3-5 FPS | Maximum detection accuracy |
+
+## Detection Classes
+
+| ID | Class Name | Category |
+|:---|:---|:---|
+| 0 | rice_disease_bacterial_leaf_blight | Disease |
+| 1 | rice_disease_brown_spot | Disease |
+| 2 | rice_disease_false_smut | Disease |
+| 3 | rice_disease_leaf_sheath_blight | Disease |
+| 4 | rice_pest_leaf_folder | Pest |
+| 5 | rice_pest_rice_skipper | Pest |
+| 6 | rice_pest_white_stem_borer | Pest |
+| 7 | rice_pest_yellow_stem_borer | Pest |
+
+## File Structure
+
+```
+├── build_annotated_dataset.py   # Build YOLO dataset from Label Studio annotations
+├── train_yolo11.py              # Train YOLOv11s (optimised for rice)
+├── train_yolo26.py              # Train YOLOv26s (optimised for rice)
+├── validate_models.py           # Validate and compare both models
+├── predict_tiled.py             # Tiled inference for large images
+├── export_jetson.py             # Export to ONNX/TensorRT for Jetson Nano 2GB
+├── jetson_inference.py          # Standalone inference on Jetson Nano 2GB
+├── jetson_setup.sh              # Jetson Nano 2GB environment setup
+├── prepare_yolo11_dataset.py    # (Legacy) Dataset prep with LabelMe annotations
+├── annotated dataset/           # Raw Label Studio annotations (rice only)
+├── rice_annotated_dataset/      # Built YOLO detection dataset (8 classes)
+└── runs/                        # Training outputs and checkpoints
+```
+
+## Hardware Requirements
+
+| Component | Training | Deployment |
+|:---|:---|:---|
+| **GPU** | NVIDIA RTX 4050 (6GB VRAM) | NVIDIA Jetson Nano 2GB |
+| **RAM** | 16GB+ | 2GB + 4GB swap |
+| **Python** | 3.12 | 3.6+ |
+| **Framework** | Ultralytics 8.4+ / PyTorch 2.11+ | ONNX Runtime |
